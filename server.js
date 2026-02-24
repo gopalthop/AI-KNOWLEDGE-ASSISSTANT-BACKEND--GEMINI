@@ -194,12 +194,22 @@ Rules:
     res.json({ success: true, answer: text });
 
   } catch (error) {
-    console.error("Gemini Error:", error);
-    res.status(500).json({
+  console.error("Gemini Error:", error);
+
+  // If Gemini quota exceeded
+  if (error.status === 429) {
+    return res.status(429).json({
       success: false,
-      error: error.message || "AI Service Error",
+      error: "Today's AI usage limit reached. Please try again tomorrow."
     });
   }
+
+  res.status(500).json({
+    success: false,
+    error: "AI Service Error"
+  });
+}
+  
 });
 
 /* ===========================
