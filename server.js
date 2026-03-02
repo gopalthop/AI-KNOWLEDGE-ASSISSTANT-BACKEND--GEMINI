@@ -6,6 +6,7 @@ const pdfParse = require("pdf-parse");
 const XLSX = require("xlsx");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 require("dotenv").config();
+const PERPLEXITY_API_KEY =process.env.PERPLEXITY_API_KEY;
 
 const app = express();
 
@@ -15,7 +16,8 @@ app.use(express.json());
 /* ===========================
    DATABASE CONNECTION
 =========================== */
-mongoose.connect(process.env.MONGO_URI)
+mongoose
+  .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB error:", err));
 
@@ -24,12 +26,47 @@ mongoose.connect(process.env.MONGO_URI)
 =========================== */
 const noteSchema = new mongoose.Schema(
   {
+    title: String,
     text: { type: String, required: true },
+    exam: String,
+    subject: String,
+    type: String,
+    year: Number,
+    source: String,
+    extracted:{
+    type:Boolean,
+    default:false
+  }
+
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const Note = mongoose.model("Note", noteSchema);
+
+/* ===========================
+   QUESTION MODEL
+=========================== */
+const questionSchema = new mongoose.Schema(
+{
+  exam: String,
+  subject: String,
+  year: Number,
+
+  question: String,
+  options: [String],
+  correctAnswer: String,
+  explanation: String,
+
+  sourceNoteId: mongoose.Schema.Types.ObjectId
+},
+{ timestamps: true }
+);
+
+const Question = mongoose.model(
+  "Question",
+  questionSchema
+);
 
 /* ===========================
    GEMINI INITIALIZATION
@@ -54,12 +91,187 @@ const parseExcelFile = (buffer) => {
     .map((row) =>
       Object.entries(row)
         .map(([key, value]) => `${key}: ${value}`)
-        .join(", ")
+        .join(", "),
     )
     .join("\n");
 };
 
 const upload = multer({ storage: multer.memoryStorage() });
+
+/* ===========================
+   AI QUESTION EXTRACTOR
+=========================== */
+
+async function extractQuestionsWithAI(text) {
+
+  const MODEL_NAME =
+    process.env.GEMINI_MODEL ||
+    "gemini-2.5-flash-lite";
+
+  const model =
+    genAI.getGenerativeModel({
+      model: MODEL_NAME
+    });
+
+  const prompt = `
+Extract ONLY multiple choice questions.
+
+Return STRICT JSON ARRAY.
+
+Format:
+
+[
+{
+"question":"...",
+"options":["A","B","C","D"],
+"correctAnswer":"...",
+"explanation":"..."
+}
+]
+
+Rules:
+- Ignore non-MCQ text
+- Do NOT invent questions
+- Do NOT add commentary
+- Output JSON ONLY
+- Minimum 4 options
+- explanation can be short
+`;
+
+  const result =
+    await model.generateContent(
+      prompt + "\n\nTEXT:\n" + text.slice(0,15000)
+    );
+
+  const response =
+    await result.response.text();
+    /* -------- CLEAN GEMINI OUTPUT -------- */
+
+const clean = response
+  .replace(/```json/g, "")
+  .replace(/```/g, "")
+  .trim();
+
+try {
+  return JSON.parse(clean);
+} catch (err) {
+  console.error("JSON Parse Failed:", clean);
+  throw new Error("AI returned invalid JSON");
+}
+
+  
+}
+/* ===========================
+   PERPLEXITY FALLBACK
+=========================== */
+
+async function askPerplexity(question, context) {
+
+const response = await fetch(
+"https://api.perplexity.ai/chat/completions",
+{
+  method:"POST",
+  headers:{
+    "Authorization":
+      `Bearer ${PERPLEXITY_API_KEY}`,
+    "Content-Type":"application/json"
+  },
+  body:JSON.stringify({
+    model:"sonar-small-chat",
+    messages:[
+      {
+        role:"system",
+        content:
+        "You are an academic assistant."
+      },
+      {
+        role:"user",
+        content:
+        `Context:\n${context}\n\nQuestion:${question}`
+      }
+    ]
+  })
+});
+
+const data = await response.json();
+
+return data
+?.choices?.[0]
+?.message?.content;
+
+}
+/* ===========================
+   EXTRACT QUESTIONS ROUTE
+=========================== */
+app.post("/api/extract/:noteId",
+async (req, res) => {
+
+try {
+
+  const note =
+    await Note.findById(
+      req.params.noteId
+    );
+
+  if (!note)
+    return res
+      .status(404)
+      .json({ message:"Note not found" });
+
+  const questions =
+    await extractQuestionsWithAI(
+      note.text
+    );
+    const alreadyExtracted =
+  await Question.findOne({
+    sourceNoteId: note._id
+  });
+  if (alreadyExtracted) {
+  return res.json({
+    success:true,
+    total:0,
+    message:"Questions already extracted"
+  });
+}
+
+
+  const savedQuestions =
+    await Question.insertMany(
+      questions.map(q => ({
+        exam: note.exam,
+        subject: note.subject,
+        year: note.year,
+
+        question: q.question,
+        options: q.options,
+        correctAnswer: q.correctAnswer,
+        explanation: q.explanation,
+
+        sourceNoteId: note._id
+      }))
+    );
+    note.extracted = true;
+await note.save();
+
+  res.json({
+    success:true,
+    total:savedQuestions.length
+  });
+
+}
+catch(err){
+
+  console.error(
+    "Extraction Error:",
+    err
+  );
+
+  res.status(500).json({
+    success:false,
+    message:"Extraction failed"
+  });
+}
+});
 
 /* ===========================
    HEALTH CHECK ROUTE
@@ -73,145 +285,226 @@ app.get("/", (req, res) => {
 =========================== */
 app.post("/api/upload", async (req, res) => {
   try {
-    const { text } = req.body;
+    // 1. Destructure all required fields, including title
+    const { title, text, exam, subject, type, year } = req.body;
 
-    if (!text) {
-      return res
-        .status(400)
-        .json({ success: false, message: "No text provided" });
+    // 2. Correct validation using logical OR (||)
+    if (!title || !text || !exam || !type) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Missing one or more required fields." 
+      });
     }
 
-    const note = new Note({ text });
+    // 3. Create the note using the destructured variables
+    const note = new Note({
+      title,
+      text,  // Replaced the undefined 'extractedText'
+      exam,
+      subject,
+      type,
+      year,
+      source: "text" // Changed from "file" since this is a text upload route
+    });
+
     await note.save();
 
-    res.json({ success: true, message: "Note saved successfully" });
+    // 4. Return a 201 Created status
+    res.status(201).json({ success: true, message: "Note saved successfully" });
+    
   } catch (err) {
     console.error("Text Upload Error:", err);
-    res.status(500).json({ success: false });
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
-
 /* ===========================
    FILE UPLOAD ROUTE (PDF + Excel)
 =========================== */
 app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
   try {
+
     if (!req.file) {
-      return res
-        .status(400)
-        .json({ success: false, message: "No file uploaded" });
+      return res.status(400).json({
+        success: false,
+        message: "No file uploaded"
+      });
+    }
+
+    const { title, exam, subject, type, year } = req.body;
+
+    // ✅ validation
+    if (!exam || !type) {
+      return res.status(400).json({
+        success: false,
+        message: "Exam and Type required"
+      });
     }
 
     let extractedText = "";
 
+    /* -------- PDF -------- */
     if (req.file.mimetype === "application/pdf") {
       const data = await pdfParse(req.file.buffer);
       extractedText = data.text;
+    }
 
-    } else if (
+    /* -------- Excel -------- */
+    else if (
       req.file.mimetype ===
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
       req.file.mimetype === "application/vnd.ms-excel"
     ) {
       extractedText = parseExcelFile(req.file.buffer);
+    }
 
-    } else {
+    else {
       return res.status(400).json({
         success: false,
-        message: "Unsupported file type",
+        message: "Unsupported file type"
       });
     }
 
-    const note = new Note({ text: extractedText });
+    /* ✅ SAVE COMPLETE METADATA */
+    const note = new Note({
+      title: title || req.file.originalname,
+      text: extractedText,
+      exam,
+      subject,
+      type,
+      year,
+      source: "file"
+    });
+
     await note.save();
 
-    res.json({ success: true, message: "File processed successfully" });
+    res.status(201).json({
+      success: true,
+      message: "File processed successfully"
+    });
 
   } catch (err) {
     console.error("File Upload Error:", err);
-    res.status(500).json({ success: false });
+    res.status(500).json({
+      success: false,
+      message: "Upload failed"
+    });
   }
 });
 
 /* ===========================
-   CHAT ROUTE (RAG + GEMINI)
+   CHAT ROUTE (GEMINI + PERPLEXITY FALLBACK)
 =========================== */
 app.post("/api/chat", async (req, res) => {
-  try {
-    const { question } = req.body;
 
-    if (!question) {
-      return res.status(400).json({
-        success: false,
-        message: "Question is required",
-      });
-    }
+try {
 
-    if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error: "API Key missing",
-      });
-    }
+const { question } = req.body;
 
-    const MODEL_NAME =
-      process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+if (!question) {
+  return res.status(400).json({
+    success:false,
+    message:"Question required"
+  });
+}
 
-    const notes = await Note.find()
-      .sort({ createdAt: -1 })
-      .limit(5);
+/* -------- CONTEXT -------- */
 
-    const context =
-      notes.length > 0
-        ? notes.map((n) => n.text).join("\n\n")
-        : "No notes found.";
+const notes =
+await Note.find()
+.sort({createdAt:-1})
+.limit(5);
 
-    const model = genAI.getGenerativeModel({
-      model: MODEL_NAME,
-    });
+const context =
+notes.length
+? notes.map(n=>n.text).join("\n\n")
+: "No notes available";
 
-    const systemPrompt = `
+/* -------- PROMPT -------- */
+
+const systemPrompt = `
 You are an Academic Assistant.
-
-Use the context below to answer.
 
 Context:
 ${context}
 
 Rules:
-- Format timetables as proper Markdown tables.
-- Do NOT break rows into multiple lines.
-- Keep answers concise.
+- Answer concisely
+- Use markdown when needed
 `;
 
-    const result = await model.generateContent(
-      `${systemPrompt}\n\nQuestion: ${question}`
-    );
+let answer;
 
-    const response = await result.response;
-    const text = response.text();
+/* ================= GEMINI FIRST ================= */
 
-    res.json({ success: true, answer: text });
+try {
 
-  } catch (error) {
-  console.error("Gemini Error:", error);
+const MODEL_NAME =
+process.env.GEMINI_MODEL ||
+"gemini-2.5-flash-lite";
 
-  // If Gemini quota exceeded
-  if (error.status === 429) {
-    return res.status(429).json({
-      success: false,
-      error: "Today's AI usage limit reached. Please try again tomorrow."
-    });
-  }
-
-  res.status(500).json({
-    success: false,
-    error: "AI Service Error"
-  });
-}
-  
+const model =
+genAI.getGenerativeModel({
+  model:MODEL_NAME
 });
 
+const result =
+await model.generateContent(
+`${systemPrompt}\n\nQuestion:${question}`
+);
+
+answer =
+(await result.response).text();
+
+console.log("✅ Gemini used");
+
+}
+
+/* ================= FALLBACK ================= */
+
+catch(error){
+
+console.log(
+"⚠ Gemini failed → switching to Perplexity"
+);
+
+/* only fallback on quota/errors */
+
+if(
+error.status === 429 ||
+error.message?.includes("quota")
+){
+answer =
+await askPerplexity(
+question,
+context
+);
+}
+else{
+throw error;
+}
+
+}
+
+/* -------- RESPONSE -------- */
+
+res.json({
+success:true,
+answer
+});
+
+}
+catch(err){
+
+console.error("Chat Error:",err);
+
+res.status(500).json({
+success:false,
+error:"AI service unavailable"
+});
+
+}
+
+});
 /* ===========================
    LIBRARY & STATS ROUTES
 =========================== */
@@ -223,13 +516,340 @@ app.get("/api/home/stats", async (req, res) => {
     res.status(500).json({ success: false });
   }
 });
+/*==========================
+PRACTICE                    
+============================*/
+app.get("/api/practice/:noteId", async (req,res)=>{
 
+try{
+
+if(!mongoose.Types.ObjectId.isValid(req.params.noteId)){
+  return res.status(400).json({
+    message:"Invalid paper id"
+  });
+}
+
+const questions =
+ await Question.aggregate([
+   {
+     $match:{
+       sourceNoteId:
+       new mongoose.Types.ObjectId(
+         req.params.noteId
+       )
+     }
+   },
+   { $sample:{ size:30 }}
+ ]);
+
+res.json({ questions });
+
+}catch(err){
+  res.status(500).json({
+    message:"Practice load failed"
+  });
+}
+
+});
+
+
+/* ===========================
+   MANUAL QUESTION ADD
+=========================== */
+app.post("/api/questions/manual", async (req,res)=>{
+
+try{
+
+const {
+  noteId,
+  question,
+  options,
+  correctAnswer,
+  explanation
+} = req.body;
+
+if(
+!noteId ||
+!question ||
+!options ||
+options.length < 2 ||
+!correctAnswer
+){
+return res.status(400).json({
+message:"Missing fields"
+});
+}
+
+const note =
+await Note.findById(noteId);
+
+if(!note){
+return res.status(404).json({
+message:"Paper not found"
+});
+}
+
+const newQuestion =
+await Question.create({
+
+exam:note.exam,
+subject:note.subject,
+year:note.year,
+
+question,
+options,
+correctAnswer,
+explanation,
+
+sourceNoteId:noteId
+});
+
+/* mark extracted true */
+note.extracted = true;
+await note.save();
+
+res.json({
+success:true,
+question:newQuestion
+});
+
+}catch(err){
+
+console.error(err);
+
+res.status(500).json({
+message:"Manual question failed"
+});
+
+}
+
+});
+/* ===========================
+   GET QUESTIONS BY PAPER
+=========================== */
+app.get("/api/questions/:noteId", async(req,res)=>{
+
+try{
+
+const questions =
+await Question.find({
+sourceNoteId:req.params.noteId
+});
+
+res.json({questions});
+
+}catch(err){
+res.status(500).json({
+message:"Failed to load questions"
+});
+}
+
+});
+/* ===========================
+   UPDATE QUESTION
+=========================== */
+app.put("/api/questions/:id", async(req,res)=>{
+
+try{
+
+const {
+question,
+options,
+correctAnswer,
+explanation
+}=req.body;
+
+const updated =
+await Question.findByIdAndUpdate(
+req.params.id,
+{
+question,
+options,
+correctAnswer,
+explanation
+},
+{new:true}
+);
+
+res.json({
+success:true,
+question:updated
+});
+
+}catch(err){
+res.status(500).json({
+message:"Update failed"
+});
+}
+
+});
+/* ===========================
+   DELETE QUESTION
+=========================== */
+app.delete("/api/questions/:id",
+async(req,res)=>{
+
+try{
+
+await Question.findByIdAndDelete(
+req.params.id
+);
+
+res.json({success:true});
+
+}catch{
+res.status(500).json({
+message:"Delete failed"
+});
+}
+
+});
+
+/* ===========================
+   AI RESULT ANALYSIS
+=========================== */
+app.post("/api/analyze-result", async (req,res)=>{
+
+try{
+
+const { answers, noteId } = req.body;
+
+if(!answers || !noteId){
+  return res.status(400).json({
+    message:"Missing data"
+  });
+}
+
+/* ---------- FETCH QUESTIONS ---------- */
+
+const questions =
+await Question.find({
+  sourceNoteId:noteId
+});
+
+/* ---------- EVALUATE ---------- */
+
+let correct=0;
+let wrongTopics=[];
+
+questions.forEach((q,index)=>{
+
+const userAnswer = answers[index];
+
+if(userAnswer===q.correctAnswer)
+  correct++;
+else
+  wrongTopics.push(q.question);
+
+});
+
+const score =
+`${correct}/${questions.length}`;
+
+/* ---------- BUILD ANALYSIS PROMPT ---------- */
+
+const analysisPrompt = `
+Student completed CUET PG test.
+
+Score: ${score}
+
+Incorrect Questions:
+${wrongTopics.slice(0,10).join("\n")}
+
+Give:
+1. Performance summary
+2. Weak concept areas
+3. Study advice
+4. Improvement strategy
+
+Keep concise.
+`;
+
+let analysis;
+
+/* ===== GEMINI FIRST ===== */
+
+try{
+
+const model =
+genAI.getGenerativeModel({
+model:"gemini-2.5-flash-lite"
+});
+
+const result =
+await model.generateContent(
+analysisPrompt
+);
+
+analysis =
+(await result.response).text();
+
+console.log("✅ Gemini Analysis");
+
+}
+
+/* ===== FALLBACK ===== */
+
+catch(error){
+
+console.log(
+"Gemini analysis failed → Perplexity"
+);
+
+analysis =
+await askPerplexity(
+analysisPrompt,
+"CUET PG Analysis"
+);
+
+}
+
+/* ---------- RESPONSE ---------- */
+
+res.json({
+success:true,
+score,
+analysis
+});
+
+}
+catch(err){
+
+console.error(err);
+
+res.status(500).json({
+success:false,
+message:"Analysis failed"
+});
+
+}
+
+});
+
+/*==========================
+     NOTES                 
+============================*/
 app.get("/api/notes", async (req, res) => {
   try {
-    const notes = await Note.find().sort({ createdAt: -1 });
-    res.json({ success: true, notes });
-  } catch {
-    res.status(500).json({ success: false });
+    const { exam, subject } = req.query;
+
+    let filter = {};
+
+    if (exam) {
+      filter.exam = exam;
+    }
+
+    if (subject) {
+      filter.subject = subject;
+    }
+
+    const notes = await Note.find(filter).sort({ createdAt: -1 });
+
+    res.json({ notes });
+  } catch (error) {
+    res.status(500).json({
+      message: "Error fetching notes",
+    });
   }
 });
 
@@ -241,12 +861,92 @@ app.delete("/api/notes/:id", async (req, res) => {
     res.status(500).json({ success: false });
   }
 });
+/* ===========================
+   DUMMY PYQ INSERT (TEST)
+=========================== */
+app.get("/api/dev/add-dummy", async (req, res) => {
+
+try {
+
+  /* ---- create fake note ---- */
+  const note = await Note.create({
+    title: "CUET PG CS Demo Paper",
+    text: "Dummy PYQ Paper",
+    exam: "CUET PG",
+    subject: "Computer Science",
+    type: "pyq",
+    year: 2024,
+    source: "manual"
+  });
+
+  /* ---- questions ---- */
+  await Question.insertMany([
+    {
+      exam:"CUET PG",
+      subject:"Computer Science",
+      year:2024,
+      question:"Which data structure uses FIFO?",
+      options:[
+        "Stack",
+        "Queue",
+        "Tree",
+        "Graph"
+      ],
+      correctAnswer:"Queue",
+      explanation:"Queue follows First In First Out.",
+      sourceNoteId:note._id
+    },
+    {
+      exam:"CUET PG",
+      subject:"Computer Science",
+      year:2024,
+      question:"Time complexity of Binary Search?",
+      options:[
+        "O(n)",
+        "O(log n)",
+        "O(n log n)",
+        "O(1)"
+      ],
+      correctAnswer:"O(log n)",
+      explanation:"Search space halves every step.",
+      sourceNoteId:note._id
+    },
+    {
+      exam:"CUET PG",
+      subject:"Computer Science",
+      year:2024,
+      question:"OS manages?",
+      options:[
+        "Hardware",
+        "Software",
+        "Resources",
+        "All of the above"
+      ],
+      correctAnswer:"All of the above",
+      explanation:"OS controls system resources.",
+      sourceNoteId:note._id
+    }
+  ]);
+
+  res.json({
+    success:true,
+    message:"Dummy PYQ added ✅"
+  });
+
+}
+catch(err){
+  console.error(err);
+  res.status(500).json({
+    success:false
+  });
+}
+
+});
+
 
 /* ===========================
    START SERVER
 =========================== */
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () =>
-  console.log(`Server running on port ${PORT}`)
-);
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
