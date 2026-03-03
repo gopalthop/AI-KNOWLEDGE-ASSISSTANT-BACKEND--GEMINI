@@ -27,7 +27,7 @@ mongoose
 const noteSchema = new mongoose.Schema(
   {
     title: String,
-    text: { type: String, required: true },
+    text: { type: String, required: false },
     exam: String,
     subject: String,
     type: String,
@@ -104,6 +104,90 @@ const parseExcelFile = (buffer) => {
 };
 
 const upload = multer({ storage: multer.memoryStorage() });
+
+/* ===========================
+   EXCEL STRUCTURED IMPORT
+=========================== */
+
+app.post("/api/upload-excel", upload.single("file"), async (req, res) => {
+  try {
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "No file uploaded"
+      });
+    }
+
+    const { title, exam, subject, year } = req.body;
+
+    if (!title || !exam) {
+      return res.status(400).json({
+        success: false,
+        message: "Title and Exam required"
+      });
+    }
+
+    const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet);
+
+    if (!rows.length) {
+      return res.status(400).json({
+        success: false,
+        message: "Excel file is empty"
+      });
+    }
+
+    /* ---- Create metadata-only Note ---- */
+
+    const note = await Note.create({
+      title,
+      exam,
+      subject,
+      type: "excel",
+      year,
+      source: "excel",
+      extracted: true
+    });
+
+    /* ---- Convert Rows to Questions ---- */
+
+    const questions = rows.map(row => ({
+      exam,
+      subject,
+      year,
+      question: row["Question"] || row.B,
+      options: [
+        row["Option A"] || row.C,
+        row["Option B"] || row.D,
+        row["Option C"] || row.E,
+        row["Option D"] || row.F
+      ].filter(Boolean), // removes undefined
+      correctAnswer: row["Correct Answer"] || row.G,
+      explanation: row["Explanation"] || row.H || "",
+      sourceNoteId: note._id
+    }));
+
+    await Question.insertMany(questions);
+
+    note.questionCount = questions.length;
+    await note.save();
+
+    res.json({
+      success: true,
+      total: questions.length,
+      message: "Excel questions imported successfully"
+    });
+
+  } catch (err) {
+    console.error("Excel Import Error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Excel import failed"
+    });
+  }
+});
 
 /* ===========================
    AI QUESTION EXTRACTOR
@@ -356,14 +440,7 @@ app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
       extractedText = data.text;
     }
 
-    /* -------- Excel -------- */
-    else if (
-      req.file.mimetype ===
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
-      req.file.mimetype === "application/vnd.ms-excel"
-    ) {
-      extractedText = parseExcelFile(req.file.buffer);
-    }
+   
 
     else {
       return res.status(400).json({
@@ -422,11 +499,10 @@ await Note.find()
 .sort({createdAt:-1})
 .limit(5);
 
-const context =
-notes.length
-? notes.map(n=>n.text).join("\n\n")
-: "No notes available";
-
+const context = notes
+  .filter(n => n.text)   // only include notes that actually have text
+  .map(n => n.text)
+  .join("\n\n") || "No text-based notes available";
 /* -------- PROMPT -------- */
 
 const systemPrompt = `
@@ -878,87 +954,6 @@ app.delete("/api/notes/:id", async (req, res) => {
   } catch {
     res.status(500).json({ success: false });
   }
-});
-/* ===========================
-   DUMMY PYQ INSERT (TEST)
-=========================== */
-app.get("/api/dev/add-dummy", async (req, res) => {
-
-try {
-
-  /* ---- create fake note ---- */
-  const note = await Note.create({
-    title: "CUET PG CS Demo Paper",
-    text: "Dummy PYQ Paper",
-    exam: "CUET PG",
-    subject: "Computer Science",
-    type: "pyq",
-    year: 2024,
-    source: "manual"
-  });
-
-  /* ---- questions ---- */
-  await Question.insertMany([
-    {
-      exam:"CUET PG",
-      subject:"Computer Science",
-      year:2024,
-      question:"Which data structure uses FIFO?",
-      options:[
-        "Stack",
-        "Queue",
-        "Tree",
-        "Graph"
-      ],
-      correctAnswer:"Queue",
-      explanation:"Queue follows First In First Out.",
-      sourceNoteId:note._id
-    },
-    {
-      exam:"CUET PG",
-      subject:"Computer Science",
-      year:2024,
-      question:"Time complexity of Binary Search?",
-      options:[
-        "O(n)",
-        "O(log n)",
-        "O(n log n)",
-        "O(1)"
-      ],
-      correctAnswer:"O(log n)",
-      explanation:"Search space halves every step.",
-      sourceNoteId:note._id
-    },
-    {
-      exam:"CUET PG",
-      subject:"Computer Science",
-      year:2024,
-      question:"OS manages?",
-      options:[
-        "Hardware",
-        "Software",
-        "Resources",
-        "All of the above"
-      ],
-      correctAnswer:"All of the above",
-      explanation:"OS controls system resources.",
-      sourceNoteId:note._id
-    }
-  ]);
-
-  res.json({
-    success:true,
-    message:"Dummy PYQ added ✅"
-  });
-
-}
-catch(err){
-  console.error(err);
-  res.status(500).json({
-    success:false
-  });
-}
-
 });
 
 
