@@ -36,11 +36,16 @@ const noteSchema = new mongoose.Schema(
     extracted:{
     type:Boolean,
     default:false
-  }
+  },
+  questionCount: {
+  type: Number,
+  default: 0
+}
 
   },
   { timestamps: true },
 );
+noteSchema.index({ exam: 1, subject: 1 });
 
 const Note = mongoose.model("Note", noteSchema);
 
@@ -62,6 +67,8 @@ const questionSchema = new mongoose.Schema(
 },
 { timestamps: true }
 );
+
+questionSchema.index({ sourceNoteId: 1 });
 
 const Question = mongoose.model(
   "Question",
@@ -250,7 +257,8 @@ try {
         sourceNoteId: note._id
       }))
     );
-    note.extracted = true;
+   note.questionCount = savedQuestions.length;
+note.extracted = true;
 await note.save();
 
   res.json({
@@ -831,24 +839,34 @@ message:"Analysis failed"
 ============================*/
 app.get("/api/notes", async (req, res) => {
   try {
-    const { exam, subject } = req.query;
+    const { exam, subject, page = 1 } = req.query;
+
+    const limit = 10;
+    const skip = (page - 1) * limit;
 
     let filter = {};
 
-    if (exam) {
-      filter.exam = exam;
-    }
+    if (exam) filter.exam = exam;
+    if (subject) filter.subject = subject;
 
-    if (subject) {
-      filter.subject = subject;
-    }
+    const notes = await Note.find(filter)
+      .select("title exam subject type year extracted questionCount")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
 
-    const notes = await Note.find(filter).sort({ createdAt: -1 });
+    const total = await Note.countDocuments(filter);
 
-    res.json({ notes });
+    res.json({
+      notes,
+      total,
+      page: Number(page),
+      totalPages: Math.ceil(total / limit)
+    });
+
   } catch (error) {
     res.status(500).json({
-      message: "Error fetching notes",
+      message: "Error fetching notes"
     });
   }
 });
