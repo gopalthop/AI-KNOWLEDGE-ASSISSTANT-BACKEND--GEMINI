@@ -613,18 +613,9 @@ if(!mongoose.Types.ObjectId.isValid(req.params.noteId)){
   });
 }
 
-const questions =
- await Question.aggregate([
-   {
-     $match:{
-       sourceNoteId:
-       new mongoose.Types.ObjectId(
-         req.params.noteId
-       )
-     }
-   },
-   { $sample:{ size:30 }}
- ]);
+const questions = await Question.find({
+  sourceNoteId: req.params.noteId
+});
 
 res.json({ questions });
 
