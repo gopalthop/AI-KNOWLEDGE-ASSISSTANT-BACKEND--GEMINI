@@ -74,6 +74,18 @@ const Question = mongoose.model(
   "Question",
   questionSchema
 );
+/* ===========================
+   STATS MODEL
+=========================== */
+
+const statsSchema = new mongoose.Schema({
+  totalAttempts: {
+    type: Number,
+    default: 0
+  }
+});
+
+const Stats = mongoose.model("Stats", statsSchema);
 
 /* ===========================
    GEMINI INITIALIZATION
@@ -594,8 +606,17 @@ error:"AI service unavailable"
 =========================== */
 app.get("/api/home/stats", async (req, res) => {
   try {
-    const count = await Note.countDocuments();
-    res.json({ success: true, totalNotes: count });
+
+    const totalNotes = await Note.countDocuments();
+
+    const stats = await Stats.findOne();
+
+    res.json({
+      success: true,
+      totalNotes,
+      totalAttempts: stats?.totalAttempts || 0
+    });
+
   } catch {
     res.status(500).json({ success: false });
   }
@@ -780,6 +801,8 @@ message:"Delete failed"
 
 });
 
+
+
 /* ===========================
    AI RESULT ANALYSIS
 =========================== */
@@ -801,6 +824,14 @@ const questions =
 await Question.find({
   sourceNoteId:noteId
 });
+
+/* ---------- UPDATE PRACTICE COUNT ---------- */
+
+await Stats.updateOne(
+  {},
+  { $inc: { totalAttempts: 1 } },
+  { upsert: true }
+);
 
 /* ---------- EVALUATE ---------- */
 
