@@ -436,7 +436,6 @@ app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
 
     const { title, exam, subject, type, year } = req.body;
 
-    // ✅ validation
     if (!exam || !type) {
       return res.status(400).json({
         success: false,
@@ -450,10 +449,7 @@ app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
     if (req.file.mimetype === "application/pdf") {
       const data = await pdfParse(req.file.buffer);
       extractedText = data.text;
-    }
-
-   
-
+    } 
     else {
       return res.status(400).json({
         success: false,
@@ -461,12 +457,17 @@ app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
       });
     }
 
-    /* ✅ SAVE COMPLETE METADATA */
+    /* normalize subject */
+    const normalizedSubject = subject
+      ? subject.trim().toLowerCase()
+      : "";
+
+    /* SAVE NOTE */
     const note = new Note({
       title: title || req.file.originalname,
       text: extractedText,
       exam,
-      subject,
+      subject: normalizedSubject,
       type,
       year,
       source: "file"
