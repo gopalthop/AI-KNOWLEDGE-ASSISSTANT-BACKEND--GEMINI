@@ -6,7 +6,7 @@ const pdfParse = require("pdf-parse");
 const XLSX = require("xlsx");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 require("dotenv").config();
-const PERPLEXITY_API_KEY =process.env.PERPLEXITY_API_KEY;
+const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
 
 const app = express();
 
@@ -33,15 +33,14 @@ const noteSchema = new mongoose.Schema(
     type: String,
     year: Number,
     source: String,
-    extracted:{
-    type:Boolean,
-    default:false
-  },
-  questionCount: {
-  type: Number,
-  default: 0
-}
-
+    extracted: {
+      type: Boolean,
+      default: false,
+    },
+    questionCount: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true },
 );
@@ -53,27 +52,24 @@ const Note = mongoose.model("Note", noteSchema);
    QUESTION MODEL
 =========================== */
 const questionSchema = new mongoose.Schema(
-{
-  exam: String,
-  subject: String,
-  year: Number,
+  {
+    exam: String,
+    subject: String,
+    year: Number,
 
-  question: String,
-  options: [String],
-  correctAnswer: String,
-  explanation: String,
+    question: String,
+    options: [String],
+    correctAnswer: String,
+    explanation: String,
 
-  sourceNoteId: mongoose.Schema.Types.ObjectId
-},
-{ timestamps: true }
+    sourceNoteId: mongoose.Schema.Types.ObjectId,
+  },
+  { timestamps: true },
 );
 
 questionSchema.index({ sourceNoteId: 1 });
 
-const Question = mongoose.model(
-  "Question",
-  questionSchema
-);
+const Question = mongoose.model("Question", questionSchema);
 /* ===========================
    STATS MODEL
 =========================== */
@@ -81,8 +77,8 @@ const Question = mongoose.model(
 const statsSchema = new mongoose.Schema({
   totalAttempts: {
     type: Number,
-    default: 0
-  }
+    default: 0,
+  },
 });
 
 const Stats = mongoose.model("Stats", statsSchema);
@@ -123,11 +119,10 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 app.post("/api/upload-excel", upload.single("file"), async (req, res) => {
   try {
-
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        message: "No file uploaded"
+        message: "No file uploaded",
       });
     }
 
@@ -136,7 +131,7 @@ app.post("/api/upload-excel", upload.single("file"), async (req, res) => {
     if (!title || !exam) {
       return res.status(400).json({
         success: false,
-        message: "Title and Exam required"
+        message: "Title and Exam required",
       });
     }
 
@@ -147,7 +142,7 @@ app.post("/api/upload-excel", upload.single("file"), async (req, res) => {
     if (!rows.length) {
       return res.status(400).json({
         success: false,
-        message: "Excel file is empty"
+        message: "Excel file is empty",
       });
     }
 
@@ -160,12 +155,12 @@ app.post("/api/upload-excel", upload.single("file"), async (req, res) => {
       type: "excel",
       year,
       source: "excel",
-      extracted: true
+      extracted: true,
     });
 
     /* ---- Convert Rows to Questions ---- */
 
-    const questions = rows.map(row => ({
+    const questions = rows.map((row) => ({
       exam,
       subject,
       year,
@@ -174,11 +169,11 @@ app.post("/api/upload-excel", upload.single("file"), async (req, res) => {
         row["Option A"] || row.C,
         row["Option B"] || row.D,
         row["Option C"] || row.E,
-        row["Option D"] || row.F
+        row["Option D"] || row.F,
       ].filter(Boolean), // removes undefined
       correctAnswer: row["Correct Answer"] || row.G,
       explanation: row["Explanation"] || row.H || "",
-      sourceNoteId: note._id
+      sourceNoteId: note._id,
     }));
 
     await Question.insertMany(questions);
@@ -189,14 +184,13 @@ app.post("/api/upload-excel", upload.single("file"), async (req, res) => {
     res.json({
       success: true,
       total: questions.length,
-      message: "Excel questions imported successfully"
+      message: "Excel questions imported successfully",
     });
-
   } catch (err) {
     console.error("Excel Import Error:", err);
     res.status(500).json({
       success: false,
-      message: "Excel import failed"
+      message: "Excel import failed",
     });
   }
 });
@@ -206,15 +200,11 @@ app.post("/api/upload-excel", upload.single("file"), async (req, res) => {
 =========================== */
 
 async function extractQuestionsWithAI(text) {
+  const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
-  const MODEL_NAME =
-    process.env.GEMINI_MODEL ||
-    "gemini-2.5-flash-lite";
-
-  const model =
-    genAI.getGenerativeModel({
-      model: MODEL_NAME
-    });
+  const model = genAI.getGenerativeModel({
+    model: MODEL_NAME,
+  });
 
   const prompt = `
 Extract ONLY multiple choice questions.
@@ -241,106 +231,78 @@ Rules:
 - explanation can be short
 `;
 
-  const result =
-    await model.generateContent(
-      prompt + "\n\nTEXT:\n" + text.slice(0,15000)
-    );
+  const result = await model.generateContent(
+    prompt + "\n\nTEXT:\n" + text.slice(0, 15000),
+  );
 
-  const response =
-    await result.response.text();
-    /* -------- CLEAN GEMINI OUTPUT -------- */
+  const response = await result.response.text();
+  /* -------- CLEAN GEMINI OUTPUT -------- */
 
-const clean = response
-  .replace(/```json/g, "")
-  .replace(/```/g, "")
-  .trim();
+  const clean = response
+    .replace(/```json/g, "")
+    .replace(/```/g, "")
+    .trim();
 
-try {
-  return JSON.parse(clean);
-} catch (err) {
-  console.error("JSON Parse Failed:", clean);
-  throw new Error("AI returned invalid JSON");
-}
-
-  
+  try {
+    return JSON.parse(clean);
+  } catch (err) {
+    console.error("JSON Parse Failed:", clean);
+    throw new Error("AI returned invalid JSON");
+  }
 }
 /* ===========================
    PERPLEXITY FALLBACK
 =========================== */
 
 async function askPerplexity(question, context) {
+  const response = await fetch("https://api.perplexity.ai/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${PERPLEXITY_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "sonar-small-chat",
+      messages: [
+        {
+          role: "system",
+          content: "You are an academic assistant.",
+        },
+        {
+          role: "user",
+          content: `Context:\n${context}\n\nQuestion:${question}`,
+        },
+      ],
+    }),
+  });
 
-const response = await fetch(
-"https://api.perplexity.ai/chat/completions",
-{
-  method:"POST",
-  headers:{
-    "Authorization":
-      `Bearer ${PERPLEXITY_API_KEY}`,
-    "Content-Type":"application/json"
-  },
-  body:JSON.stringify({
-    model:"sonar-small-chat",
-    messages:[
-      {
-        role:"system",
-        content:
-        "You are an academic assistant."
-      },
-      {
-        role:"user",
-        content:
-        `Context:\n${context}\n\nQuestion:${question}`
-      }
-    ]
-  })
-});
+  const data = await response.json();
 
-const data = await response.json();
-
-return data
-?.choices?.[0]
-?.message?.content;
-
+  return data?.choices?.[0]?.message?.content;
 }
 /* ===========================
    EXTRACT QUESTIONS ROUTE
 =========================== */
-app.post("/api/extract/:noteId",
-async (req, res) => {
+app.post("/api/extract/:noteId", async (req, res) => {
+  try {
+    const note = await Note.findById(req.params.noteId);
 
-try {
+    if (!note) return res.status(404).json({ message: "Note not found" });
 
-  const note =
-    await Note.findById(
-      req.params.noteId
-    );
+    const questions = await extractQuestionsWithAI(note.text);
+    const alreadyExtracted = await Question.findOne({
+      sourceNoteId: note._id,
+    });
+    if (alreadyExtracted) {
+      return res.json({
+        success: true,
+        total: 0,
+        message: "Questions already extracted",
+      });
+    }
 
-  if (!note)
-    return res
-      .status(404)
-      .json({ message:"Note not found" });
-
-  const questions =
-    await extractQuestionsWithAI(
-      note.text
-    );
-    const alreadyExtracted =
-  await Question.findOne({
-    sourceNoteId: note._id
-  });
-  if (alreadyExtracted) {
-  return res.json({
-    success:true,
-    total:0,
-    message:"Questions already extracted"
-  });
-}
-
-
-  const savedQuestions =
-    await Question.insertMany(
-      questions.map(q => ({
+    const savedQuestions = await Question.insertMany(
+      questions.map((q) => ({
         exam: note.exam,
         subject: note.subject,
         year: note.year,
@@ -350,31 +312,25 @@ try {
         correctAnswer: q.correctAnswer,
         explanation: q.explanation,
 
-        sourceNoteId: note._id
-      }))
+        sourceNoteId: note._id,
+      })),
     );
-   note.questionCount = savedQuestions.length;
-note.extracted = true;
-await note.save();
+    note.questionCount = savedQuestions.length;
+    note.extracted = true;
+    await note.save();
 
-  res.json({
-    success:true,
-    total:savedQuestions.length
-  });
+    res.json({
+      success: true,
+      total: savedQuestions.length,
+    });
+  } catch (err) {
+    console.error("Extraction Error:", err);
 
-}
-catch(err){
-
-  console.error(
-    "Extraction Error:",
-    err
-  );
-
-  res.status(500).json({
-    success:false,
-    message:"Extraction failed"
-  });
-}
+    res.status(500).json({
+      success: false,
+      message: "Extraction failed",
+    });
+  }
 });
 
 /* ===========================
@@ -394,28 +350,27 @@ app.post("/api/upload", async (req, res) => {
 
     // 2. Correct validation using logical OR (||)
     if (!title || !text || !exam || !type) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Missing one or more required fields." 
+      return res.status(400).json({
+        success: false,
+        message: "Missing one or more required fields.",
       });
     }
 
     // 3. Create the note using the destructured variables
     const note = new Note({
       title,
-      text,  // Replaced the undefined 'extractedText'
+      text, // Replaced the undefined 'extractedText'
       exam,
       subject,
       type,
       year,
-      source: "text" // Changed from "file" since this is a text upload route
+      source: "text", // Changed from "file" since this is a text upload route
     });
 
     await note.save();
 
     // 4. Return a 201 Created status
     res.status(201).json({ success: true, message: "Note saved successfully" });
-    
   } catch (err) {
     console.error("Text Upload Error:", err);
     res.status(500).json({ success: false, message: "Internal server error" });
@@ -426,11 +381,10 @@ app.post("/api/upload", async (req, res) => {
 =========================== */
 app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
   try {
-
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        message: "No file uploaded"
+        message: "No file uploaded",
       });
     }
 
@@ -439,7 +393,7 @@ app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
     if (!exam || !type) {
       return res.status(400).json({
         success: false,
-        message: "Exam and Type required"
+        message: "Exam and Type required",
       });
     }
 
@@ -449,18 +403,15 @@ app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
     if (req.file.mimetype === "application/pdf") {
       const data = await pdfParse(req.file.buffer);
       extractedText = data.text;
-    } 
-    else {
+    } else {
       return res.status(400).json({
         success: false,
-        message: "Unsupported file type"
+        message: "Unsupported file type",
       });
     }
 
     /* normalize subject */
-    const normalizedSubject = subject
-      ? subject.trim().toLowerCase()
-      : "";
+    const normalizedSubject = subject ? subject.trim().toLowerCase() : "";
 
     /* SAVE NOTE */
     const note = new Note({
@@ -470,21 +421,20 @@ app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
       subject: normalizedSubject,
       type,
       year,
-      source: "file"
+      source: "file",
     });
 
     await note.save();
 
     res.status(201).json({
       success: true,
-      message: "File processed successfully"
+      message: "File processed successfully",
     });
-
   } catch (err) {
     console.error("File Upload Error:", err);
     res.status(500).json({
       success: false,
-      message: "Upload failed"
+      message: "Upload failed",
     });
   }
 });
@@ -493,32 +443,28 @@ app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
    CHAT ROUTE (GEMINI + PERPLEXITY FALLBACK)
 =========================== */
 app.post("/api/chat", async (req, res) => {
+  try {
+    const { question } = req.body;
 
-try {
+    if (!question) {
+      return res.status(400).json({
+        success: false,
+        message: "Question required",
+      });
+    }
 
-const { question } = req.body;
+    /* -------- CONTEXT -------- */
 
-if (!question) {
-  return res.status(400).json({
-    success:false,
-    message:"Question required"
-  });
-}
+    const notes = await Note.find().sort({ createdAt: -1 }).limit(5);
 
-/* -------- CONTEXT -------- */
+    const context =
+      notes
+        .filter((n) => n.text) // only include notes that actually have text
+        .map((n) => n.text)
+        .join("\n\n") || "No text-based notes available";
+    /* -------- PROMPT -------- */
 
-const notes =
-await Note.find()
-.sort({createdAt:-1})
-.limit(5);
-
-const context = notes
-  .filter(n => n.text)   // only include notes that actually have text
-  .map(n => n.text)
-  .join("\n\n") || "No text-based notes available";
-/* -------- PROMPT -------- */
-
-const systemPrompt = `
+    const systemPrompt = `
 You are an Academic Assistant.
 
 Context:
@@ -529,85 +475,58 @@ Rules:
 - Use markdown when needed
 `;
 
-let answer;
+    let answer;
 
-/* ================= GEMINI FIRST ================= */
+    /* ================= GEMINI FIRST ================= */
 
-try {
+    try {
+      const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 
-const MODEL_NAME =
-process.env.GEMINI_MODEL ||
-"gemini-2.5-flash-lite";
+      const model = genAI.getGenerativeModel({
+        model: MODEL_NAME,
+      });
 
-const model =
-genAI.getGenerativeModel({
-  model:MODEL_NAME
-});
+      const result = await model.generateContent(
+        `${systemPrompt}\n\nQuestion:${question}`,
+      );
 
-const result =
-await model.generateContent(
-`${systemPrompt}\n\nQuestion:${question}`
-);
+      answer = (await result.response).text();
 
-answer =
-(await result.response).text();
+      console.log("✅ Gemini used");
+    } catch (error) {
+      /* ================= FALLBACK ================= */
 
-console.log("✅ Gemini used");
+      console.log("⚠ Gemini failed → switching to Perplexity");
 
-}
+      /* only fallback on quota/errors */
 
-/* ================= FALLBACK ================= */
+      if (error.status === 429 || error.message?.includes("quota")) {
+        answer = await askPerplexity(question, context);
+      } else {
+        throw error;
+      }
+    }
 
-catch(error){
+    /* -------- RESPONSE -------- */
 
-console.log(
-"⚠ Gemini failed → switching to Perplexity"
-);
+    res.json({
+      success: true,
+      answer,
+    });
+  } catch (err) {
+    console.error("Chat Error:", err);
 
-/* only fallback on quota/errors */
-
-if(
-error.status === 429 ||
-error.message?.includes("quota")
-){
-answer =
-await askPerplexity(
-question,
-context
-);
-}
-else{
-throw error;
-}
-
-}
-
-/* -------- RESPONSE -------- */
-
-res.json({
-success:true,
-answer
-});
-
-}
-catch(err){
-
-console.error("Chat Error:",err);
-
-res.status(500).json({
-success:false,
-error:"AI service unavailable"
-});
-
-}
-
+    res.status(500).json({
+      success: false,
+      error: "AI service unavailable",
+    });
+  }
 });
 /* ===========================
    LIBRARY & STATS ROUTES
 =========================== */
 app.get("/api/home/stats", async (req, res) => {
   try {
-
     const totalNotes = await Note.countDocuments();
 
     const stats = await Stats.findOne();
@@ -615,9 +534,8 @@ app.get("/api/home/stats", async (req, res) => {
     res.json({
       success: true,
       totalNotes,
-      totalAttempts: stats?.totalAttempts || 0
+      totalAttempts: stats?.totalAttempts || 0,
     });
-
   } catch {
     res.status(500).json({ success: false });
   }
@@ -625,243 +543,187 @@ app.get("/api/home/stats", async (req, res) => {
 /*==========================
 PRACTICE                    
 ============================*/
-app.get("/api/practice/:noteId", async (req,res)=>{
+app.get("/api/practice/:noteId", async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.noteId)) {
+      return res.status(400).json({
+        message: "Invalid paper id",
+      });
+    }
 
-try{
+    const questions = await Question.find({
+      sourceNoteId: req.params.noteId,
+    });
 
-if(!mongoose.Types.ObjectId.isValid(req.params.noteId)){
-  return res.status(400).json({
-    message:"Invalid paper id"
-  });
-}
-
-const questions = await Question.find({
-  sourceNoteId: req.params.noteId
+    res.json({ questions });
+  } catch (err) {
+    res.status(500).json({
+      message: "Practice load failed",
+    });
+  }
 });
-
-res.json({ questions });
-
-}catch(err){
-  res.status(500).json({
-    message:"Practice load failed"
-  });
-}
-
-});
-
 
 /* ===========================
    MANUAL QUESTION ADD
 =========================== */
-app.post("/api/questions/manual", async (req,res)=>{
+app.post("/api/questions/manual", async (req, res) => {
+  try {
+    const { noteId, question, options, correctAnswer, explanation } = req.body;
 
-try{
+    if (
+      !noteId ||
+      !question ||
+      !options ||
+      options.length < 2 ||
+      !correctAnswer
+    ) {
+      return res.status(400).json({
+        message: "Missing fields",
+      });
+    }
 
-const {
-  noteId,
-  question,
-  options,
-  correctAnswer,
-  explanation
-} = req.body;
+    const note = await Note.findById(noteId);
 
-if(
-!noteId ||
-!question ||
-!options ||
-options.length < 2 ||
-!correctAnswer
-){
-return res.status(400).json({
-message:"Missing fields"
-});
-}
+    if (!note) {
+      return res.status(404).json({
+        message: "Paper not found",
+      });
+    }
 
-const note =
-await Note.findById(noteId);
+    const newQuestion = await Question.create({
+      exam: note.exam,
+      subject: note.subject,
+      year: note.year,
 
-if(!note){
-return res.status(404).json({
-message:"Paper not found"
-});
-}
+      question,
+      options,
+      correctAnswer,
+      explanation,
 
-const newQuestion =
-await Question.create({
+      sourceNoteId: noteId,
+    });
 
-exam:note.exam,
-subject:note.subject,
-year:note.year,
+    /* mark extracted true */
+    note.extracted = true;
+    await note.save();
 
-question,
-options,
-correctAnswer,
-explanation,
+    res.json({
+      success: true,
+      question: newQuestion,
+    });
+  } catch (err) {
+    console.error(err);
 
-sourceNoteId:noteId
-});
-
-/* mark extracted true */
-note.extracted = true;
-await note.save();
-
-res.json({
-success:true,
-question:newQuestion
-});
-
-}catch(err){
-
-console.error(err);
-
-res.status(500).json({
-message:"Manual question failed"
-});
-
-}
-
+    res.status(500).json({
+      message: "Manual question failed",
+    });
+  }
 });
 /* ===========================
    GET QUESTIONS BY PAPER
 =========================== */
-app.get("/api/questions/:noteId", async(req,res)=>{
+app.get("/api/questions/:noteId", async (req, res) => {
+  try {
+    const questions = await Question.find({
+      sourceNoteId: req.params.noteId,
+    });
 
-try{
-
-const questions =
-await Question.find({
-sourceNoteId:req.params.noteId
-});
-
-res.json({questions});
-
-}catch(err){
-res.status(500).json({
-message:"Failed to load questions"
-});
-}
-
+    res.json({ questions });
+  } catch (err) {
+    res.status(500).json({
+      message: "Failed to load questions",
+    });
+  }
 });
 /* ===========================
    UPDATE QUESTION
 =========================== */
-app.put("/api/questions/:id", async(req,res)=>{
+app.put("/api/questions/:id", async (req, res) => {
+  try {
+    const { question, options, correctAnswer, explanation } = req.body;
 
-try{
+    const updated = await Question.findByIdAndUpdate(
+      req.params.id,
+      {
+        question,
+        options,
+        correctAnswer,
+        explanation,
+      },
+      { new: true },
+    );
 
-const {
-question,
-options,
-correctAnswer,
-explanation
-}=req.body;
-
-const updated =
-await Question.findByIdAndUpdate(
-req.params.id,
-{
-question,
-options,
-correctAnswer,
-explanation
-},
-{new:true}
-);
-
-res.json({
-success:true,
-question:updated
-});
-
-}catch(err){
-res.status(500).json({
-message:"Update failed"
-});
-}
-
+    res.json({
+      success: true,
+      question: updated,
+    });
+  } catch (err) {
+    res.status(500).json({
+      message: "Update failed",
+    });
+  }
 });
 /* ===========================
    DELETE QUESTION
 =========================== */
-app.delete("/api/questions/:id",
-async(req,res)=>{
+app.delete("/api/questions/:id", async (req, res) => {
+  try {
+    await Question.findByIdAndDelete(req.params.id);
 
-try{
-
-await Question.findByIdAndDelete(
-req.params.id
-);
-
-res.json({success:true});
-
-}catch{
-res.status(500).json({
-message:"Delete failed"
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({
+      message: "Delete failed",
+    });
+  }
 });
-}
-
-});
-
-
 
 /* ===========================
    AI RESULT ANALYSIS
 =========================== */
-app.post("/api/analyze-result", async (req,res)=>{
+app.post("/api/analyze-result", async (req, res) => {
+  try {
+    const { answers, noteId } = req.body;
 
-try{
+    if (!answers || !noteId) {
+      return res.status(400).json({
+        message: "Missing data",
+      });
+    }
 
-const { answers, noteId } = req.body;
+    /* ---------- FETCH QUESTIONS ---------- */
 
-if(!answers || !noteId){
-  return res.status(400).json({
-    message:"Missing data"
-  });
-}
+    const questions = await Question.find({
+      sourceNoteId: noteId,
+    });
 
-/* ---------- FETCH QUESTIONS ---------- */
+    /* ---------- UPDATE PRACTICE COUNT ---------- */
 
-const questions =
-await Question.find({
-  sourceNoteId:noteId
-});
+    await Stats.updateOne({}, { $inc: { totalAttempts: 1 } }, { upsert: true });
 
-/* ---------- UPDATE PRACTICE COUNT ---------- */
+    /* ---------- EVALUATE ---------- */
 
-await Stats.updateOne(
-  {},
-  { $inc: { totalAttempts: 1 } },
-  { upsert: true }
-);
+    let correct = 0;
+    let wrongTopics = [];
 
-/* ---------- EVALUATE ---------- */
+    questions.forEach((q, index) => {
+      const userAnswer = answers[index];
 
-let correct=0;
-let wrongTopics=[];
+      if (userAnswer === q.correctAnswer) correct++;
+      else wrongTopics.push(q.question);
+    });
 
-questions.forEach((q,index)=>{
+    const score = `${correct}/${questions.length}`;
 
-const userAnswer = answers[index];
+    /* ---------- BUILD ANALYSIS PROMPT ---------- */
 
-if(userAnswer===q.correctAnswer)
-  correct++;
-else
-  wrongTopics.push(q.question);
-
-});
-
-const score =
-`${correct}/${questions.length}`;
-
-/* ---------- BUILD ANALYSIS PROMPT ---------- */
-
-const analysisPrompt = `
+    const analysisPrompt = `
 Student completed CUET PG test.
 
 Score: ${score}
 
 Incorrect Questions:
-${wrongTopics.slice(0,10).join("\n")}
+${wrongTopics.slice(0, 10).join("\n")}
 
 Give:
 1. Performance summary
@@ -872,65 +734,43 @@ Give:
 Keep concise.
 `;
 
-let analysis;
+    let analysis;
 
-/* ===== GEMINI FIRST ===== */
+    /* ===== GEMINI FIRST ===== */
 
-try{
+    try {
+      const model = genAI.getGenerativeModel({
+        model: "gemini-2.5-flash-lite",
+      });
 
-const model =
-genAI.getGenerativeModel({
-model:"gemini-2.5-flash-lite"
-});
+      const result = await model.generateContent(analysisPrompt);
 
-const result =
-await model.generateContent(
-analysisPrompt
-);
+      analysis = (await result.response).text();
 
-analysis =
-(await result.response).text();
+      console.log("✅ Gemini Analysis");
+    } catch (error) {
+      /* ===== FALLBACK ===== */
 
-console.log("✅ Gemini Analysis");
+      console.log("Gemini analysis failed → Perplexity");
 
-}
+      analysis = await askPerplexity(analysisPrompt, "CUET PG Analysis");
+    }
 
-/* ===== FALLBACK ===== */
+    /* ---------- RESPONSE ---------- */
 
-catch(error){
+    res.json({
+      success: true,
+      score,
+      analysis,
+    });
+  } catch (err) {
+    console.error(err);
 
-console.log(
-"Gemini analysis failed → Perplexity"
-);
-
-analysis =
-await askPerplexity(
-analysisPrompt,
-"CUET PG Analysis"
-);
-
-}
-
-/* ---------- RESPONSE ---------- */
-
-res.json({
-success:true,
-score,
-analysis
-});
-
-}
-catch(err){
-
-console.error(err);
-
-res.status(500).json({
-success:false,
-message:"Analysis failed"
-});
-
-}
-
+    res.status(500).json({
+      success: false,
+      message: "Analysis failed",
+    });
+  }
 });
 
 /*==========================
@@ -938,10 +778,7 @@ message:"Analysis failed"
 ============================*/
 app.get("/api/notes", async (req, res) => {
   try {
-    const { exam, subject, page = 1 } = req.query;
-
-    const limit = 10;
-    const skip = (page - 1) * limit;
+    const { exam, subject } = req.query;
 
     let filter = {};
 
@@ -950,26 +787,15 @@ app.get("/api/notes", async (req, res) => {
 
     const notes = await Note.find(filter)
       .select("title exam subject type year extracted questionCount")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
+      .sort({ createdAt: -1 });
 
-    const total = await Note.countDocuments(filter);
-
-    res.json({
-      notes,
-      total,
-      page: Number(page),
-      totalPages: Math.ceil(total / limit)
-    });
-
+    res.json({ notes });
   } catch (error) {
     res.status(500).json({
-      message: "Error fetching notes"
+      message: "Error fetching notes",
     });
   }
 });
-
 app.delete("/api/notes/:id", async (req, res) => {
   try {
     await Note.findByIdAndDelete(req.params.id);
@@ -978,7 +804,6 @@ app.delete("/api/notes/:id", async (req, res) => {
     res.status(500).json({ success: false });
   }
 });
-
 
 /* ===========================
    START SERVER
