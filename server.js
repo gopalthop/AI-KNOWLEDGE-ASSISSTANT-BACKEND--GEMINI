@@ -111,7 +111,12 @@ const parseExcelFile = (buffer) => {
     .join("\n");
 };
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 1 * 1024 * 1024 // 1MB
+  }
+});
 
 /* ===========================
    EXCEL STRUCTURED IMPORT
@@ -377,10 +382,11 @@ app.post("/api/upload", async (req, res) => {
   }
 });
 /* ===========================
-   FILE UPLOAD ROUTE (PDF + Excel)
+   FILE UPLOAD ROUTE (PDF)
 =========================== */
 app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
   try {
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -430,8 +436,19 @@ app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
       success: true,
       message: "File processed successfully",
     });
+
   } catch (err) {
+
+    /* HANDLE MULTER SIZE ERROR */
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
+        success: false,
+        message: "File size must be less than 1MB",
+      });
+    }
+
     console.error("File Upload Error:", err);
+
     res.status(500).json({
       success: false,
       message: "Upload failed",
